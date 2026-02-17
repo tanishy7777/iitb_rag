@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Digital Brain - Admin</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="layout">
+    <h1>Digital Brain - Admin Dashboard</h1>
+    <p class="sub">Most frequent breakdowns, unresolved issues, and operator feedback signal.</p>
+    <nav>
+      <a href="/operator.html">Operator View</a>
+      <a href="/admin.html">Admin Dashboard</a>
+    </nav>
+
+    <section class="card">
+      <button id="refresh" class="alt">Refresh Analytics</button>
+    </section>
+
+    <section class="card">
+      <h3>Top Breakdown Machines</h3>
+      <ul id="top-breakdowns"></ul>
+    </section>
+
+    <section class="card">
+      <h3>Breakdowns by Category</h3>
+      <ul id="category-breakdowns"></ul>
+    </section>
+
+    <section class="card">
+      <h3>Monthly Breakdown Trend</h3>
+      <ul id="monthly-breakdowns"></ul>
+    </section>
+
+    <section class="card">
+      <h3>Knowledge Gaps (Unresolved Issues)</h3>
+      <ul id="unresolved"></ul>
+    </section>
+
+    <section class="card">
+      <h3>Knowledge Gap Clusters</h3>
+      <ul id="knowledge-gaps"></ul>
+    </section>
+
+    <section class="card">
+      <h3>At-Risk Queue (Failed Feedback)</h3>
+      <ul id="failed-feedback"></ul>
+    </section>
+
+    <section class="card">
+      <h3>Feedback Summary</h3>
+      <ul id="feedback"></ul>
+    </section>
+  </main>
+
+  <script>
+    function fillList(id, rows) {
+      const ul = document.getElementById(id);
+      ul.innerHTML = '';
+      rows.forEach((row) => {
+        const li = document.createElement('li');
+        li.textContent = row;
+        ul.appendChild(li);
+      });
+    }
+
+    async function refresh() {
+      const res = await fetch('/api/admin/analytics');
+      const data = await res.json();
+
+      fillList('top-breakdowns', (data.top_breakdowns || []).map(r => {
+        const name = r.name || `Machine ${r.machine_id}`;
+        return `${name} (${r.machine_id}): ${r.count} complaints`;
+      }));
+
+      fillList('category-breakdowns', (data.category_breakdowns || []).map(r => {
+        return `${r.category}: ${r.count}`;
+      }));
+
+      fillList('monthly-breakdowns', (data.monthly_breakdowns || []).map(r => {
+        return `${r.month_key}: ${r.count} complaints`;
+      }));
+
+      fillList('unresolved', (data.unresolved_issues || []).slice(0, 15).map(r => {
+        const text = (r.complaint_description || '').replace(/\s+/g, ' ').slice(0, 140);
+        return `${r.complaint_id} | machine ${r.machine_id} | ${text}`;
+      }));
+
+      fillList('knowledge-gaps', (data.knowledge_gaps || []).map(r => {
+        return `${r.keyword}: ${r.count} mentions`;
+      }));
+
+      fillList('failed-feedback', (data.failed_feedback || []).slice(0, 15).map(r => {
+        const issue = (r.issue || '').replace(/\s+/g, ' ').slice(0, 120);
+        return `${r.machine_id} | ${r.name || 'Unknown'} | ${issue}`;
+      }));
+
+      fillList('feedback', (data.feedback_summary || []).map(r => {
+        return `Machine ${r.machine_id}: helpful=${r.helpful_count || 0}, not_helpful=${r.not_helpful_count || 0}`;
+      }));
+    }
+
+    document.getElementById('refresh').addEventListener('click', refresh);
+    refresh();
+  </script>
+</body>
+</html>

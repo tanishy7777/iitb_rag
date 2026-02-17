@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Digital Brain - Operator</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="layout">
+    <h1>Digital Brain - Operator Console</h1>
+    <p class="sub">Machine troubleshooting with manual grounding + historical fixes.</p>
+    <nav>
+      <a href="/operator.html">Operator View</a>
+      <a href="/admin.html">Admin Dashboard</a>
+    </nav>
+
+    <section class="card">
+      <h3>Recent Machines</h3>
+      <ul id="recent-machines"></ul>
+    </section>
+
+    <section class="card">
+      <div class="grid two">
+        <div>
+          <label for="machine">Machine</label>
+          <select id="machine"></select>
+        </div>
+        <div>
+          <label for="question">Issue</label>
+          <input id="question" placeholder="e.g. vacuum leak and pressure not stable" />
+        </div>
+      </div>
+      <div class="grid three" style="margin-top:10px;">
+        <button id="chip-power" class="alt">Power</button>
+        <button id="chip-hydraulics" class="alt">Hydraulics</button>
+        <button id="chip-tooling" class="alt">Tooling</button>
+      </div>
+      <div style="margin-top:10px;">
+        <button id="ask">Run Diagnosis</button>
+      </div>
+      <p id="loading-status" class="small loading-indicator" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="loading-text">Working...</span>
+      </p>
+    </section>
+
+    <section class="card">
+      <h3>Diagnosis Output</h3>
+      <p class="small" id="answer-meta"></p>
+      <pre id="answer">No query yet.</pre>
+      <div class="grid two">
+        <div>
+          <h4>Checklist</h4>
+          <ul id="checklist"></ul>
+        </div>
+        <div>
+          <h4>Citations</h4>
+          <ul id="citations"></ul>
+        </div>
+      </div>
+      <div>
+        <h4>Historical Suggestions</h4>
+        <ul id="history"></ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Interactive Troubleshooting Flow</h3>
+      <p class="small" id="flow-meta">Run diagnosis to generate history-aware routing.</p>
+      <pre id="flow-step">No flow generated yet.</pre>
+      <div class="grid two">
+        <button id="flow-yes" class="good">Yes</button>
+        <button id="flow-no" class="bad">No</button>
+      </div>
+      <div style="margin-top:10px;">
+        <button id="flow-next" class="alt">Step Completed</button>
+      </div>
+      <div>
+        <h4>Traversal Log</h4>
+        <ul id="flow-log"></ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Did this fix it?</h3>
+      <div class="grid two">
+        <button class="good" id="yes">Thumbs Up</button>
+        <button class="bad" id="no">Thumbs Down</button>
+      </div>
+      <label for="workaround" style="margin-top:10px;">Workaround or actual fix</label>
+      <textarea id="workaround" placeholder="What actually worked on the floor?"></textarea>
+      <p class="small" id="feedback-status"></p>
+    </section>
+  </main>
+
+  <script>
+    let lastSessionId = "";
+    let flowNodes = {};
+    let currentFlowNodeId = "";
+    let flowLog = [];
+    let uiBusy = false;
+
+    function setUiBusy(isBusy, text) {
+      uiBusy = isBusy;
+      const controls = [
+        'ask',
+        'flow-yes',
+        'flow-no',
+        'flow-next',
+        'yes',
+        'no',
+        'chip-power',
+        'chip-hydraulics',
+        'chip-tooling'
+      ];
+      controls.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = isBusy;
+      });
+
+      const loading = document.getElementById('loading-status');
+      const loadingText = document.getElementById('loading-text');
+      if (isBusy) {
+        loadingText.textContent = text || 'Working...';
+        loading.hidden = false;
+      } else {
+        loading.hidden = true;
+      }
+    }
+
+    async function loadMachines() {
+      const res = await fetch('/api/machines');
+      const data = await res.json();
+      const select = document.getElementById('machine');
+      select.innerHTML = '';
+      const preferred = new Set([1, 3, 7]);
+
+      const sorted = [...data.machines].sort((a, b) => {
+        const ap = preferred.has(a.machine_id) ? 0 : 1;
+        const bp = preferred.has(b.machine_id) ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return a.machine_id - b.machine_id;
+      });
+
+      sorted.forEach((m) => {
+        const opt = document.createElement('option');
+        opt.value = m.machine_id;
+        opt.textContent = `${m.machine_id} - ${m.name}`;
+        select.appendChild(opt);
+      });
+    }
+
+    async function loadRecentMachines() {
+      const res = await fetch('/api/machines/recent?limit=8');
+      const data = await res.json();
+      const ul = document.getElementById('recent-machines');
+      ul.innerHTML = '';
+      (data.recent_machines || []).forEach((row) => {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.className = 'alt';
+        btn.textContent = `${row.machine_id} - ${row.name || 'Unknown'}: ${(row.issue || '').slice(0, 60)}`;
+        btn.addEventListener('click', () => {
+          document.getElementById('machine').value = row.machine_id;
+          document.getElementById('question').value = row.issue || '';
+        });
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+      if (!ul.children.length) {
+        const li = document.createElement('li');
+        li.textContent = 'No recent machine sessions yet.';
+        ul.appendChild(li);
+      }
+    }
+
+    function renderList(id, rows) {
+      const ul = document.getElementById(id);
+      ul.innerHTML = '';
+      rows.forEach((value) => {
+        const li = document.createElement('li');
+        li.textContent = value;
+        ul.appendChild(li);
+      });
+    }
+
+    function setFlowVisibility(kind) {
+      const yesBtn = document.getElementById('flow-yes');
+      const noBtn = document.getElementById('flow-no');
+      const nextBtn = document.getElementById('flow-next');
+
+      if (kind === 'question') {
+        yesBtn.style.display = 'block';
+        noBtn.style.display = 'block';
+        nextBtn.style.display = 'none';
+        return;
+      }
+      if (kind === 'action') {
+        yesBtn.style.display = 'none';
+        noBtn.style.display = 'none';
+        nextBtn.style.display = 'block';
+        return;
+      }
+      yesBtn.style.display = 'none';
+      noBtn.style.display = 'none';
+      nextBtn.style.display = 'none';
+    }
+
+    function renderCurrentNode(node, edgeLabel) {
+      if (!node) {
+        document.getElementById('flow-step').textContent = 'Flow node not found.';
+        setFlowVisibility('final');
+        return;
+      }
+      currentFlowNodeId = node.id || "";
+      const prefix = edgeLabel ? `${edgeLabel}: ` : '';
+      document.getElementById('flow-step').textContent = `${prefix}${node.text}`;
+      setFlowVisibility(node.kind);
+
+      if (edgeLabel) {
+        flowLog.push(`${edgeLabel} -> ${node.text}`);
+      } else {
+        flowLog.push(`Start -> ${node.text}`);
+      }
+      renderList('flow-log', flowLog);
+    }
+
+    function initFlow(flow, currentNode) {
+      const nodes = flow?.nodes || [];
+      flowNodes = {};
+      nodes.forEach((node) => {
+        flowNodes[node.id] = node;
+      });
+      flowLog = [];
+
+      const history = flow?.history_snapshot || {};
+      const totals = Object.entries(history)
+        .filter(([_, v]) => (v?.count || 0) > 0)
+        .slice(0, 3)
+        .map(([k, v]) => `${k}:${v.count}`);
+      document.getElementById('flow-meta').textContent = totals.length
+        ? `History signals used: ${totals.join(', ')}`
+        : 'History signal is limited for this machine.';
+
+      if (!currentNode || !currentNode.id) {
+        document.getElementById('flow-step').textContent = 'No flow generated yet.';
+        setFlowVisibility('final');
+        renderList('flow-log', []);
+        return;
+      }
+
+      renderCurrentNode(currentNode, '');
+    }
+
+    async function flowStep(responseValue, label) {
+      if (!lastSessionId) {
+        document.getElementById('flow-step').textContent = 'Start diagnosis first.';
+        return;
+      }
+
+      setUiBusy(true, 'Processing troubleshooting step...');
+      try {
+        const res = await fetch('/api/troubleshoot/next', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: lastSessionId,
+            response: responseValue
+          })
+        });
+        const data = await res.json();
+        if (data.error) {
+          document.getElementById('flow-step').textContent = data.error;
+          return;
+        }
+
+        renderCurrentNode(data.current_node, label);
+        if (data.is_closed) {
+          document.getElementById('feedback-status').textContent = 'Troubleshooting flow closed. Please submit fix feedback.';
+        }
+      } finally {
+        setUiBusy(false, '');
+      }
+    }
+
+    document.getElementById('ask').addEventListener('click', async () => {
+      const machineId = Number(document.getElementById('machine').value);
+      const question = document.getElementById('question').value.trim();
+      if (!question) return;
+      if (uiBusy) return;
+
+      setUiBusy(true, 'Running diagnosis with RAG/LLM...');
+      try {
+        const res = await fetch('/api/troubleshoot/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ machine_id: machineId, question })
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          document.getElementById('answer').textContent = data.error;
+          return;
+        }
+
+        lastSessionId = data.session_id;
+        document.getElementById('answer').textContent = data.answer;
+        document.getElementById('answer-meta').textContent = `Mode: ${data.answer_mode || 'deterministic'} | Confidence: ${data.confidence_label || 'unknown'} (${data.confidence_score || 0})`;
+        renderList('checklist', data.checklist || []);
+        renderList('citations', (data.citations || []).map(c => `${c.doc_type}: ${c.path}`));
+        renderList('history', (data.historical_suggestions || []).map(s => `${s.action} (x${s.support_count})`));
+        initFlow(data.troubleshooting_flow || {}, data.current_node || null);
+        document.getElementById('feedback-status').textContent = `Session: ${lastSessionId}`;
+        loadRecentMachines();
+      } finally {
+        setUiBusy(false, '');
+      }
+    });
+
+    document.getElementById('flow-yes').addEventListener('click', () => {
+      flowStep('yes', 'Yes');
+    });
+
+    document.getElementById('flow-no').addEventListener('click', () => {
+      flowStep('no', 'No');
+    });
+
+    document.getElementById('flow-next').addEventListener('click', () => {
+      flowStep('done', 'Completed');
+    });
+
+    async function sendFeedback(helpful) {
+      const machineId = Number(document.getElementById('machine').value);
+      const issue = document.getElementById('question').value.trim();
+      const workaround = document.getElementById('workaround').value.trim();
+      if (!lastSessionId || !issue) {
+        document.getElementById('feedback-status').textContent = 'Run diagnosis before sending feedback.';
+        return;
+      }
+      if (uiBusy) return;
+
+      setUiBusy(true, 'Saving feedback...');
+      try {
+        const res = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: lastSessionId,
+            machine_id: machineId,
+            issue,
+            helpful,
+            workaround
+          })
+        });
+        const data = await res.json();
+        document.getElementById('feedback-status').textContent = data.ok ? 'Feedback saved.' : (data.error || 'Feedback failed.');
+        loadRecentMachines();
+      } finally {
+        setUiBusy(false, '');
+      }
+    }
+
+    document.getElementById('yes').addEventListener('click', () => sendFeedback(true));
+    document.getElementById('no').addEventListener('click', () => sendFeedback(false));
+    document.getElementById('chip-power').addEventListener('click', () => {
+      document.getElementById('question').value = 'power issue interlock breaker alarm';
+    });
+    document.getElementById('chip-hydraulics').addEventListener('click', () => {
+      document.getElementById('question').value = 'vacuum pressure leak gas flow issue';
+    });
+    document.getElementById('chip-tooling').addEventListener('click', () => {
+      document.getElementById('question').value = 'recipe alignment wafer process issue';
+    });
+
+    loadMachines();
+    loadRecentMachines();
+    setFlowVisibility('final');
+  </script>
+</body>
+</html>
