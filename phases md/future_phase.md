@@ -1,3 +1,31 @@
+Next:
+• 1. Stabilize this React cutover
+
+  - Run frontend build/test in your local env (npm install, npm run build), fix any runtime/UI regressions.
+  - Add frontend smoke tests for /login, /operator, /admin, filters/tabs, and auth redirects.
+
+  2. Add backend tests for new analytics filters
+
+  - Cover /api/admin/analytics filter combinations (machine_id, category, date_from, date_to).
+  - Add negative tests for invalid date formats/ranges.
+
+  3. Security hardening (next major feature)
+
+  - Implement password reset + rotation policy.
+  - Add account lifecycle controls (lock/disable/force reset/unlock) end-to-end.
+
+  4. Retrieval upgrade
+
+  - Implement hybrid retrieval (BM25 + vector) with configurable weights and fallback.
+  - Add retrieval debug metadata + relevance evaluation set.
+
+  5. Operational readiness
+
+  - Add metrics/audit views for fallback rate, latency, confidence distribution, and flow mode usage.
+  - Add deployment/runbook docs for review/demo environments.
+
+
+
 • Next phase is production hardening + pilot readiness.
 
   1. Enterprise Auth Hardening
