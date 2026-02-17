@@ -20,6 +20,7 @@ PYTHONPATH=src python3 -m digital_brain ingest --data-dir data
 export DIGITAL_BRAIN_AUTH_ENABLED=1
 export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_USER=admin
 export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_PASSWORD=admin123
+export DIGITAL_BRAIN_UI_MODE=react
 export DIGITAL_BRAIN_LLM_PROVIDER=ollama
 export DIGITAL_BRAIN_OLLAMA_MODEL=llama3
 export DIGITAL_BRAIN_OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -29,16 +30,16 @@ PYTHONPATH=src python3 -m digital_brain serve --host 127.0.0.1 --port 8080
 
 Open:
 
-- `http://127.0.0.1:8080/login.html`
-- then `operator.html` and `admin.html` after login
+- `http://127.0.0.1:8080/login`
+- then `/operator` and `/admin` after login
 
 ## Suggested Talk Track
 
 ### Part 0: RBAC Proof (2 minutes)
 Steps:
 
-1. Open `login.html` and sign in as `admin`.
-2. Show `admin.html` loads and includes User Access Management.
+1. Open `/login` and sign in as `admin`.
+2. Show `/admin` loads and includes User Access Management.
 3. Sign out and login as operator account.
 4. Show operator access works and admin-only actions are restricted.
 
@@ -63,7 +64,7 @@ Evidence:
 ### Part 2: Grounded Query + Citations (5 minutes)
 Steps:
 
-1. Login as operator/admin and open `operator.html`.
+1. Login as operator/admin and open `/operator`.
 2. Enter issue text, for example: `vacuum leak and pressure instability`.
 3. Submit query.
 4. Show response sections:
@@ -120,7 +121,7 @@ Narrate:
 "New field knowledge is available immediately on the next query. No retraining job required."
 
 ### Part 5: Admin Dashboard Evidence (5 minutes)
-In `admin.html`, show:
+In `/admin`, show:
 
 1. Top breakdown machines.
 2. Category and monthly trends.

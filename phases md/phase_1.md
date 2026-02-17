@@ -9,7 +9,7 @@ Implemented the first end-to-end MVP slice against your uploaded seed data.
   - SQLite persistence + analytics in src/digital_brain/repository.py.
   - HTTP API + static serving in src/digital_brain/api_server.py.
   - CLI entrypoints in src/digital_brain/cli.py and src/digital_brain/__main__.py.
-  - Operator/Admin UI mock pages in web/operator.html, web/admin.html, web/styles.css.
+  - Operator/Admin UI in React routes (`/operator`, `/admin`) under `frontend/src/pages/*` with `web/*.html` fallback.
   - Smoke/unit tests in tests/test_service_smoke.py and tests/test_sql_dump.py.
   - Usage docs in README.md and helper script scripts/bootstrap.sh.
 

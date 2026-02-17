@@ -14,11 +14,13 @@
   - `export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_USER=admin`
   - `export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_PASSWORD=admin123`
 - [ ] Confirm server can start cleanly:
+  - `cd frontend && npm install && npm run build`
+  - `export DIGITAL_BRAIN_UI_MODE=react`
   - `PYTHONPATH=src python3 -m digital_brain serve --host 127.0.0.1 --port 8080`
 - [ ] Verify both pages load:
-  - `http://127.0.0.1:8080/login.html`
-  - `http://127.0.0.1:8080/operator.html`
-  - `http://127.0.0.1:8080/admin.html`
+  - `http://127.0.0.1:8080/login`
+  - `http://127.0.0.1:8080/operator`
+  - `http://127.0.0.1:8080/admin`
 
 ## T-60 Minutes
 
@@ -28,6 +30,7 @@
   - `export DIGITAL_BRAIN_AUTH_ENABLED=1`
   - `export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_USER=admin`
   - `export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_PASSWORD=admin123`
+  - `export DIGITAL_BRAIN_UI_MODE=react`
   - `export DIGITAL_BRAIN_LLM_PROVIDER=ollama`
   - `export DIGITAL_BRAIN_OLLAMA_MODEL=llama3`
   - `export DIGITAL_BRAIN_OLLAMA_BASE_URL=http://127.0.0.1:11434`

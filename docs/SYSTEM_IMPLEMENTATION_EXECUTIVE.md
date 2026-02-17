@@ -16,6 +16,12 @@ It is designed to answer floor issues with grounded evidence and improve from ac
 ## 2. Current Delivery Status
 Overall: **MVP end-to-end delivered** with realtime updates, RBAC auth, and local LLM support.
 
+### Canonical UI Routes
+- Login: `/login`
+- Operator: `/operator`
+- Admin: `/admin`
+- Legacy `.html` pages are fallback-only compatibility paths.
+
 ### Completed
 - Seed ingestion from PDFs + SQL dumps
 - Retrieval with citations and machine-aware context

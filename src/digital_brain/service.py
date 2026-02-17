@@ -679,9 +679,26 @@ class DigitalBrainService:
         )
         return {"ok": True}
 
-    def admin_analytics(self) -> dict[str, Any]:
-        analytics = self.repo.admin_analytics()
+    def admin_analytics(
+        self,
+        machine_id: int | None = None,
+        category: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> dict[str, Any]:
+        analytics = self.repo.admin_analytics(
+            machine_id=machine_id,
+            category=category,
+            date_from=date_from,
+            date_to=date_to,
+        )
         analytics["knowledge_gaps"] = self._knowledge_gap_clusters(analytics)
+        analytics["applied_filters"] = {
+            "machine_id": machine_id,
+            "category": category or "",
+            "date_from": date_from or "",
+            "date_to": date_to or "",
+        }
         return analytics
 
     def _bootstrap_admin_if_needed(self) -> None:

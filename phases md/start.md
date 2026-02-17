@@ -11,3 +11,8 @@ PYTHONPATH=src python3 -m digital_brain serve --host 127.0.0.1 --port 8080
 Enable/disable hybrid flow explicitly:
       - export DIGITAL_BRAIN_FLOW_LLM_ASSIST=1 (enabled)
       - export DIGITAL_BRAIN_FLOW_LLM_ASSIST=0 (force deterministic flow)
+
+UI mode:
+cd frontend && npm install && npm run build
+export DIGITAL_BRAIN_UI_MODE=react
+auto (has fallsback mode)

@@ -1,5 +1,9 @@
 # Slide 1: Problem and Vision
 
+## Route Standard
+- Canonical UI routes: `/login`, `/operator`, `/admin`
+- Legacy `.html` routes are fallback-only compatibility paths.
+
 ## Problem
 - Operators troubleshoot under noisy, high-pressure conditions.
 - Manuals are static; practical fixes live in tribal knowledge.

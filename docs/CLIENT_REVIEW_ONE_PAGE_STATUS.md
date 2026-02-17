@@ -28,6 +28,10 @@ What is working today end-to-end:
 8. Admin user management (create/update users, role and active status).
 9. Local LLM RAG with Ollama `llama3` plus deterministic fallback.
 
+Canonical UI route standard for the review:
+- `/login`, `/operator`, `/admin`
+- legacy `.html` links are fallback-only compatibility paths.
+
 ## Measurable Evidence
 Latest ingest result on current branch:
 

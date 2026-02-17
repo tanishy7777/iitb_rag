@@ -692,75 +692,160 @@ class Repository:
                 (session_id, node_id, response, next_node_id),
             )
 
-    def admin_analytics(self) -> dict[str, Any]:
+    def admin_analytics(
+        self,
+        machine_id: int | None = None,
+        category: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> dict[str, Any]:
+        machine_filter = int(machine_id) if machine_id is not None else None
+        category_filter = str(category or "").strip().lower()
+        date_from_filter = str(date_from or "").strip()
+        date_to_filter = str(date_to or "").strip()
+
+        def complaint_filter_clauses(*, include_known_machine_only: bool, include_open_only: bool) -> tuple[list[str], list[Any]]:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if include_known_machine_only:
+                clauses.extend(["c.machine_id IS NOT NULL", "c.machine_id != 0"])
+            if include_open_only:
+                clauses.append("c.status != 2")
+            if machine_filter is not None:
+                clauses.append("c.machine_id = ?")
+                params.append(machine_filter)
+            if category_filter:
+                clauses.append("LOWER(COALESCE(m.category, '')) = ?")
+                params.append(category_filter)
+            if date_from_filter:
+                clauses.append("SUBSTR(c.time_of_complaint, 1, 10) >= ?")
+                params.append(date_from_filter)
+            if date_to_filter:
+                clauses.append("SUBSTR(c.time_of_complaint, 1, 10) <= ?")
+                params.append(date_to_filter)
+            return clauses, params
+
+        def feedback_filter_clauses(*, include_failed_only: bool) -> tuple[list[str], list[Any]]:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if include_failed_only:
+                clauses.append("f.helpful = 0")
+            if machine_filter is not None:
+                clauses.append("f.machine_id = ?")
+                params.append(machine_filter)
+            if category_filter:
+                clauses.append("LOWER(COALESCE(m.category, '')) = ?")
+                params.append(category_filter)
+            if date_from_filter:
+                clauses.append("SUBSTR(f.created_at, 1, 10) >= ?")
+                params.append(date_from_filter)
+            if date_to_filter:
+                clauses.append("SUBSTR(f.created_at, 1, 10) <= ?")
+                params.append(date_to_filter)
+            return clauses, params
+
         with self.connect() as conn:
+            top_clauses, top_params = complaint_filter_clauses(
+                include_known_machine_only=True,
+                include_open_only=False,
+            )
+            top_where = f"WHERE {' AND '.join(top_clauses)}" if top_clauses else ""
             top_breakdowns = conn.execute(
-                """
+                f"""
                 SELECT c.machine_id, m.name, COUNT(*) AS count
                 FROM complaints c
                 LEFT JOIN machines m ON m.machine_id = c.machine_id
-                WHERE c.machine_id IS NOT NULL AND c.machine_id != 0
+                {top_where}
                 GROUP BY c.machine_id
                 ORDER BY count DESC
                 LIMIT 10
-                """
+                """,
+                top_params,
             ).fetchall()
 
+            category_clauses, category_params = complaint_filter_clauses(
+                include_known_machine_only=True,
+                include_open_only=False,
+            )
+            category_where = f"WHERE {' AND '.join(category_clauses)}" if category_clauses else ""
             category_breakdowns = conn.execute(
-                """
+                f"""
                 SELECT COALESCE(m.category, 'uncategorized') AS category, COUNT(*) AS count
                 FROM complaints c
                 LEFT JOIN machines m ON m.machine_id = c.machine_id
-                WHERE c.machine_id IS NOT NULL AND c.machine_id != 0
+                {category_where}
                 GROUP BY COALESCE(m.category, 'uncategorized')
                 ORDER BY count DESC
                 LIMIT 12
-                """
+                """,
+                category_params,
             ).fetchall()
 
+            monthly_clauses, monthly_params = complaint_filter_clauses(
+                include_known_machine_only=False,
+                include_open_only=False,
+            )
+            monthly_clauses.insert(0, "c.time_of_complaint GLOB '????-??-*'")
+            monthly_where = f"WHERE {' AND '.join(monthly_clauses)}" if monthly_clauses else ""
             monthly_breakdowns = conn.execute(
-                """
+                f"""
                 SELECT SUBSTR(c.time_of_complaint, 1, 7) AS month_key, COUNT(*) AS count
                 FROM complaints c
-                WHERE c.time_of_complaint GLOB '????-??-*'
+                LEFT JOIN machines m ON m.machine_id = c.machine_id
+                {monthly_where}
                 GROUP BY SUBSTR(c.time_of_complaint, 1, 7)
                 ORDER BY month_key DESC
                 LIMIT 6
-                """
+                """,
+                monthly_params,
             ).fetchall()
 
+            unresolved_clauses, unresolved_params = complaint_filter_clauses(
+                include_known_machine_only=False,
+                include_open_only=True,
+            )
+            unresolved_where = f"WHERE {' AND '.join(unresolved_clauses)}" if unresolved_clauses else ""
             unresolved = conn.execute(
-                """
+                f"""
                 SELECT c.complaint_id, c.machine_id, m.name, c.complaint_description, c.time_of_complaint
                 FROM complaints c
                 LEFT JOIN machines m ON m.machine_id = c.machine_id
-                WHERE c.status != 2
+                {unresolved_where}
                 ORDER BY c.time_of_complaint DESC
                 LIMIT 25
-                """
+                """,
+                unresolved_params,
             ).fetchall()
 
+            failed_clauses, failed_params = feedback_filter_clauses(include_failed_only=True)
+            failed_where = f"WHERE {' AND '.join(failed_clauses)}" if failed_clauses else ""
             failed_feedback = conn.execute(
-                """
+                f"""
                 SELECT f.session_id, f.machine_id, m.name, f.issue, f.workaround, f.created_at
                 FROM feedback f
                 LEFT JOIN machines m ON m.machine_id = f.machine_id
-                WHERE f.helpful = 0
+                {failed_where}
                 ORDER BY f.created_at DESC
                 LIMIT 25
-                """
+                """,
+                failed_params,
             ).fetchall()
 
+            summary_clauses, summary_params = feedback_filter_clauses(include_failed_only=False)
+            summary_where = f"WHERE {' AND '.join(summary_clauses)}" if summary_clauses else ""
             feedback_summary = conn.execute(
-                """
-                SELECT machine_id,
-                       SUM(CASE WHEN helpful = 1 THEN 1 ELSE 0 END) AS helpful_count,
-                       SUM(CASE WHEN helpful = 0 THEN 1 ELSE 0 END) AS not_helpful_count
-                FROM feedback
-                GROUP BY machine_id
+                f"""
+                SELECT f.machine_id,
+                       SUM(CASE WHEN f.helpful = 1 THEN 1 ELSE 0 END) AS helpful_count,
+                       SUM(CASE WHEN f.helpful = 0 THEN 1 ELSE 0 END) AS not_helpful_count
+                FROM feedback f
+                LEFT JOIN machines m ON m.machine_id = f.machine_id
+                {summary_where}
+                GROUP BY f.machine_id
                 ORDER BY (helpful_count + not_helpful_count) DESC
                 LIMIT 10
-                """
+                """,
+                summary_params,
             ).fetchall()
 
         return {

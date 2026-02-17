@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, DEFAULT_WEB_DIR
+from .config import (
+    AUTH_COOKIE_NAME,
+    AUTH_COOKIE_SECURE,
+    DEFAULT_FRONTEND_DIST_DIR,
+    DEFAULT_WEB_DIR,
+)
 from .service import DigitalBrainService
+
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class BrainHandler(SimpleHTTPRequestHandler):
     service: DigitalBrainService
+    ui_mode = "legacy"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -43,7 +53,46 @@ class BrainHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/admin/analytics":
             if self._require_roles({"admin"}) is None:
                 return
-            self._json_response(200, self.service.admin_analytics())
+            query = parse_qs(parsed.query)
+
+            raw_machine_id = str((query.get("machine_id") or [""])[0]).strip()
+            machine_id: int | None = None
+            if raw_machine_id:
+                try:
+                    machine_id = int(raw_machine_id)
+                except ValueError:
+                    self._json_response(400, {"error": "machine_id must be an integer"})
+                    return
+                if machine_id <= 0:
+                    self._json_response(400, {"error": "machine_id must be a positive integer"})
+                    return
+
+            category = str((query.get("category") or [""])[0]).strip()
+            if category and len(category) > 80:
+                self._json_response(400, {"error": "category is too long"})
+                return
+
+            date_from, err_from = self._optional_date(query, "date_from")
+            if err_from:
+                self._json_response(400, {"error": err_from})
+                return
+            date_to, err_to = self._optional_date(query, "date_to")
+            if err_to:
+                self._json_response(400, {"error": err_to})
+                return
+            if date_from and date_to and date_from > date_to:
+                self._json_response(400, {"error": "date_from must be less than or equal to date_to"})
+                return
+
+            self._json_response(
+                200,
+                self.service.admin_analytics(
+                    machine_id=machine_id,
+                    category=(category or None),
+                    date_from=date_from,
+                    date_to=date_to,
+                ),
+            )
             return
 
         if parsed.path == "/api/admin/users":
@@ -66,6 +115,10 @@ class BrainHandler(SimpleHTTPRequestHandler):
                 self._json_response(404, {"error": str(exc)})
                 return
             self._json_response(200, payload)
+            return
+
+        if self._is_react_ui():
+            self._handle_react_get(parsed)
             return
 
         if parsed.path == "/login.html":
@@ -278,6 +331,86 @@ class BrainHandler(SimpleHTTPRequestHandler):
         if not token:
             return None
         return self.service.get_authenticated_user(token, refresh=refresh)
+
+    def _optional_date(self, query: dict, key: str) -> tuple[str | None, str]:
+        raw = str((query.get(key) or [""])[0]).strip()
+        if not raw:
+            return None, ""
+        if not DATE_RE.fullmatch(raw):
+            return None, f"{key} must be YYYY-MM-DD"
+        return raw, ""
+
+    def _is_react_ui(self) -> bool:
+        return str(getattr(self, "ui_mode", "legacy")).strip().lower() == "react"
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def _handle_react_get(self, parsed) -> None:
+        path = parsed.path
+
+        if path in {"/login.html", "/operator.html", "/admin.html"}:
+            redirect_map = {
+                "/login.html": "/login",
+                "/operator.html": "/operator",
+                "/admin.html": "/admin",
+            }
+            self._redirect(redirect_map[path])
+            return
+
+        if path == "/":
+            if self.service.auth_enabled:
+                user = self._current_user(refresh=False)
+                if user:
+                    if str(user.get("role") or "") == "admin":
+                        self._redirect("/admin")
+                        return
+                    self._redirect("/operator")
+                    return
+                self._redirect("/login")
+                return
+            self._redirect("/operator")
+            return
+
+        if path == "/login":
+            if self.service.auth_enabled:
+                user = self._current_user(refresh=False)
+                if user:
+                    if str(user.get("role") or "") == "admin":
+                        self._redirect("/admin")
+                        return
+                    self._redirect("/operator")
+                    return
+            self.path = "/index.html"
+            super().do_GET()
+            return
+
+        if path == "/operator":
+            if self.service.auth_enabled:
+                user = self._current_user(refresh=False)
+                if user is None or str(user.get("role") or "") not in {"operator", "admin"}:
+                    self._redirect("/login?next=/operator")
+                    return
+            self.path = "/index.html"
+            super().do_GET()
+            return
+
+        if path == "/admin":
+            if self.service.auth_enabled:
+                user = self._current_user(refresh=False)
+                if user is None:
+                    self._redirect("/login?next=/admin")
+                    return
+                if str(user.get("role") or "") != "admin":
+                    self._redirect("/operator")
+                    return
+            self.path = "/index.html"
+            super().do_GET()
+            return
+
+        super().do_GET()
 
     def _require_roles(self, roles: set[str]) -> dict | None:
         if not self.service.auth_enabled:
@@ -524,18 +657,38 @@ class BrainHandler(SimpleHTTPRequestHandler):
 
 
 def run_server(service: DigitalBrainService, host: str = "127.0.0.1", port: int = 8080) -> None:
-    os.chdir(DEFAULT_WEB_DIR)
+    ui_mode, static_dir = _resolve_ui_mode_and_static_dir()
+    os.chdir(static_dir)
 
     class Handler(BrainHandler):
         pass
 
     Handler.service = service
+    Handler.ui_mode = ui_mode
 
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"Digital Brain server running on http://{host}:{port}")
+    print(f"Digital Brain server running on http://{host}:{port} (ui={ui_mode}, static_dir={static_dir})")
     server.serve_forever()
 
 
 def ensure_web_assets() -> Path:
     DEFAULT_WEB_DIR.mkdir(parents=True, exist_ok=True)
     return DEFAULT_WEB_DIR
+
+
+def _resolve_ui_mode_and_static_dir() -> tuple[str, Path]:
+    requested = os.getenv("DIGITAL_BRAIN_UI_MODE", "legacy").strip().lower()
+    if requested not in {"legacy", "react", "auto"}:
+        requested = "legacy"
+
+    react_ready = (DEFAULT_FRONTEND_DIST_DIR / "index.html").exists()
+    if requested == "auto":
+        mode = "react" if react_ready else "legacy"
+    elif requested == "react":
+        mode = "react" if react_ready else "legacy"
+    else:
+        mode = "legacy"
+
+    static_dir = DEFAULT_FRONTEND_DIST_DIR if mode == "react" else DEFAULT_WEB_DIR
+    static_dir.mkdir(parents=True, exist_ok=True)
+    return mode, static_dir

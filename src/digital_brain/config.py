@@ -9,6 +9,8 @@ DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_STATE_DIR = PROJECT_ROOT / ".state"
 DEFAULT_DB_PATH = DEFAULT_STATE_DIR / "digital_brain.db"
 DEFAULT_WEB_DIR = PROJECT_ROOT / "web"
+DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend"
+DEFAULT_FRONTEND_DIST_DIR = DEFAULT_FRONTEND_DIR / "dist"
 
 
 def env_flag(name: str, default: bool = False) -> bool:

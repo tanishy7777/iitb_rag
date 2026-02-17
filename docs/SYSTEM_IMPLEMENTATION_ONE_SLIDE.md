@@ -4,6 +4,7 @@
 A self-evolving industrial troubleshooting platform combining manual-grounded RAG, realtime feedback learning, and role-based access control.
 
 ## What Is Live Now
+- Canonical UI routes: `/login`, `/operator`, `/admin` (legacy `.html` routes are fallback-only)
 - Auth + RBAC (`operator`, `admin`) with login/session APIs
 - End-to-end operator flow: machine selection -> diagnosis -> troubleshooting -> outcome feedback
 - Grounded answers with manual citations + historical fixes

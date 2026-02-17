@@ -89,8 +89,8 @@ Still pending for production hardening:
 
 ```mermaid
 flowchart LR
-    U[Operator UI\nweb/operator.html] --> API[HTTP API\napi_server.py]
-    A[Admin UI\nweb/admin.html] --> API
+    U[Operator UI\n/frontend route: /operator] --> API[HTTP API\napi_server.py]
+    A[Admin UI\n/frontend route: /admin] --> API
     CLI[CLI\npython -m digital_brain] --> API
 
     API --> SVC[DigitalBrainService]
@@ -149,10 +149,14 @@ flowchart TD
   API routes and static UI serving
 - `src/digital_brain/cli.py`  
   operational CLI
-- `web/operator.html`  
-  operator UX
-- `web/admin.html`  
-  management dashboard
+- `frontend/src/pages/OperatorPage.tsx`  
+  operator UX (canonical route: `/operator`)
+- `frontend/src/pages/AdminPage.tsx`  
+  management dashboard (canonical route: `/admin`)
+- `frontend/src/pages/LoginPage.tsx`  
+  auth login page (canonical route: `/login`)
+- `web/*.html`  
+  legacy fallback UI pages
 - `tests/test_service_smoke.py`, `tests/test_sql_dump.py`, `tests/test_auth_rbac.py`, `tests/test_hybrid_flow.py`  
   baseline tests
 
@@ -384,7 +388,7 @@ This ensures that new complaint/trouble/feedback inputs can influence next-query
 
 ## 11. Operator UI Behavior
 
-Implemented in `web/operator.html`:
+Implemented in `frontend/src/pages/OperatorPage.tsx` (route: `/operator`):
 
 1. Login/session check with logout control
 2. Recent machines panel
@@ -402,7 +406,7 @@ Implemented in `web/operator.html`:
 
 ## 12. Admin UI Behavior
 
-Implemented in `web/admin.html`:
+Implemented in `frontend/src/pages/AdminPage.tsx` (route: `/admin`):
 
 - Top breakdown machines
 - Breakdowns by category
@@ -450,6 +454,12 @@ Implemented in `web/admin.html`:
 - `GET /api/admin/users`
 - `POST /api/admin/users`
 - `POST /api/admin/users/update`
+
+`GET /api/admin/analytics` supports optional filters:
+- `machine_id=<int>`
+- `category=<string>`
+- `date_from=YYYY-MM-DD`
+- `date_to=YYYY-MM-DD`
 
 ### 13.1 API JSON Examples
 All payloads below are illustrative examples from the current contract in `src/digital_brain/api_server.py`.
