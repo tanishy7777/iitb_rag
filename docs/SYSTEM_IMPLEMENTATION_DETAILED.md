@@ -26,6 +26,7 @@ The current implementation delivers an **end-to-end industrial troubleshooting M
 6. Admin analytics with unresolved queues and knowledge-gap signals.
 7. Optional local LLM synthesis using **Ollama llama3** (default), with deterministic fallback.
 8. Confidence gating and low-evidence guardrails.
+9. Authentication + role-based access control (operator/admin) with session cookies.
 
 ---
 
@@ -72,10 +73,12 @@ Implemented:
 - Confidence scoring + labels
 - Citation/low-evidence guardrail path
 - Audit logging
+- Auth + RBAC baseline (`operator`/`admin`)
+- Admin user management APIs and UI controls
 - Unit/smoke tests
 
 Still pending for production hardening:
-- Full authN/authZ
+- Enterprise authN/authZ hardening (password rotation policy, reset flow, SSO integration)
 - Rich observability stack (metrics/tracing dashboard)
 - Concurrency/load validation for larger scale
 - Migration strategy beyond SQLite
@@ -150,7 +153,7 @@ flowchart TD
   operator UX
 - `web/admin.html`  
   management dashboard
-- `tests/test_service_smoke.py`, `tests/test_sql_dump.py`  
+- `tests/test_service_smoke.py`, `tests/test_sql_dump.py`, `tests/test_auth_rbac.py`, `tests/test_hybrid_flow.py`  
   baseline tests
 
 ---
@@ -169,6 +172,8 @@ Main tables:
 - `troubleshoot_events`
 - `recent_machine_access`
 - `audit_logs`
+- `users`
+- `auth_sessions`
 
 ER-style relationship view:
 
@@ -184,6 +189,8 @@ erDiagram
 
     MACHINES ||--o{ FEEDBACK : receives
     MACHINES ||--o{ RECENT_MACHINE_ACCESS : recent_use
+
+    USERS ||--o{ AUTH_SESSIONS : owns
 
     AUDIT_LOGS {
       int id
@@ -306,6 +313,22 @@ sequenceDiagram
     end
 ```
 
+## 8.3 Hybrid flow generation (LLM + deterministic guard)
+
+The troubleshooting flow now uses a hybrid strategy:
+
+1. Build deterministic baseline flow from triage + historical signals.
+2. If answer mode is LLM and confidence is not guardrailed, request an LLM flow proposal.
+3. Validate proposal shape and routing:
+   - node count limits
+   - unique IDs
+   - allowed kinds (`question`, `action`, `final`)
+   - required transitions (`yes/no` or `next`)
+   - valid start node and reachable final node
+4. If valid, return `flow_mode=llm_assisted`.
+5. If invalid or unavailable, return deterministic flow with
+   `flow_mode=deterministic_fallback` and a `flow_reason`.
+
 ---
 
 ## 9. RAG Details
@@ -328,6 +351,10 @@ Implemented modes:
 
 3. `deterministic` fallback
 - Used when provider unavailable or errors
+
+Flow synthesis support:
+- `synthesize_flow(...)` requests structured flow JSON from LLM
+- Returned flow is accepted only after deterministic validation in service layer
 
 ## 9.3 Guardrails
 - Confidence score is computed from citation score quality + suggestion support
@@ -359,15 +386,17 @@ This ensures that new complaint/trouble/feedback inputs can influence next-query
 
 Implemented in `web/operator.html`:
 
-1. Recent machines panel
-2. Machine selector and issue input
-3. Triage smart chips (`Power`, `Hydraulics`, `Tooling`)
-4. Diagnosis answer + mode/confidence display
-5. Checklist and citations
-6. Historical suggestions
-7. Interactive yes/no troubleshooting flow
-8. Feedback capture (`Thumbs Up/Down` + workaround)
-9. Loading indicator and busy-state locking for latency visibility
+1. Login/session check with logout control
+2. Recent machines panel
+3. Machine selector and issue input
+4. Triage smart chips (`Power`, `Hydraulics`, `Tooling`)
+5. Diagnosis answer + mode/confidence display
+6. Checklist and citations
+7. Historical suggestions
+8. Interactive yes/no troubleshooting flow
+9. Flow metadata display (`flow_mode`, `flow_source`, `flow_reason`)
+10. Feedback capture (`Thumbs Up/Down` + workaround)
+11. Loading indicator and busy-state locking for latency visibility
 
 ---
 
@@ -382,6 +411,12 @@ Implemented in `web/admin.html`:
 - Knowledge-gap keyword clusters
 - At-risk queue from failed feedback
 - Feedback summary by machine
+- Login/session check with role enforcement (admin-only)
+- User Access Management panel:
+  - create/update user
+  - set role (`operator`/`admin`)
+  - set active/inactive
+  - optional password reset update
 
 ---
 
@@ -400,6 +435,11 @@ Implemented in `web/admin.html`:
 ### Feedback
 - `POST /api/feedback`
 
+### Auth
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+
 ### Realtime ingest
 - `POST /api/realtime/document`
 - `POST /api/realtime/complaint`
@@ -407,9 +447,154 @@ Implemented in `web/admin.html`:
 
 ### Admin
 - `GET /api/admin/analytics`
+- `GET /api/admin/users`
+- `POST /api/admin/users`
+- `POST /api/admin/users/update`
 
 ### 13.1 API JSON Examples
 All payloads below are illustrative examples from the current contract in `src/digital_brain/api_server.py`.
+
+#### `POST /api/auth/login`
+
+Request:
+
+```json
+{
+  "username": "admin",
+  "password": "admin123"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "user": {
+    "id": 1,
+    "username": "admin",
+    "role": "admin"
+  },
+  "expires_at": "2026-02-18 12:30:00"
+}
+```
+
+#### `GET /api/auth/me`
+
+Response (authenticated):
+
+```json
+{
+  "auth_enabled": true,
+  "authenticated": true,
+  "user": {
+    "id": 1,
+    "username": "admin",
+    "role": "admin"
+  },
+  "expires_at": "2026-02-18 12:30:00"
+}
+```
+
+Response (unauthenticated):
+
+```json
+{
+  "auth_enabled": true,
+  "authenticated": false
+}
+```
+
+#### `POST /api/auth/logout`
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+#### `GET /api/admin/users`
+
+Response:
+
+```json
+{
+  "users": [
+    {
+      "id": 1,
+      "username": "admin",
+      "role": "admin",
+      "is_active": true,
+      "created_at": "2026-02-17 22:11:00"
+    },
+    {
+      "id": 2,
+      "username": "operator1",
+      "role": "operator",
+      "is_active": true,
+      "created_at": "2026-02-17 22:16:00"
+    }
+  ]
+}
+```
+
+#### `POST /api/admin/users`
+
+Request:
+
+```json
+{
+  "username": "operator2",
+  "password": "operator234",
+  "role": "operator",
+  "is_active": true,
+  "upsert": true
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "user": {
+    "id": 3,
+    "username": "operator2",
+    "role": "operator",
+    "is_active": true
+  }
+}
+```
+
+#### `POST /api/admin/users/update`
+
+Request:
+
+```json
+{
+  "user_id": 3,
+  "role": "admin",
+  "is_active": true,
+  "password": "new-secret"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "user": {
+    "id": 3,
+    "username": "operator2",
+    "role": "admin",
+    "is_active": true,
+    "created_at": "2026-02-17 22:18:00"
+  }
+}
+```
 
 #### `GET /api/machines`
 
@@ -509,6 +694,8 @@ Response:
   ],
   "troubleshooting_flow": {
     "start_node_id": "q1",
+    "flow_mode": "llm_assisted",
+    "flow_source": "llm_ollama_flow",
     "query_terms": [
       "rf",
       "power",
@@ -579,6 +766,9 @@ Response:
   "historical_suggestions": [],
   "troubleshooting_flow": {
     "start_node_id": "q1",
+    "flow_mode": "deterministic_fallback",
+    "flow_source": "history_rules",
+    "flow_reason": "llm_flow_question_missing_edges",
     "nodes": []
   },
   "current_node": {
@@ -800,6 +990,10 @@ Realtime updates:
 - `python -m digital_brain realtime-add-complaint ...`
 - `python -m digital_brain realtime-add-trouble-event ...`
 
+Auth user management:
+
+- `python -m digital_brain create-user --username ... --password ... --role operator|admin --upsert`
+
 Analytics/recent:
 
 - `python -m digital_brain recent-machines --limit 8`
@@ -820,6 +1014,16 @@ Env vars:
 - `DIGITAL_BRAIN_OPENAI_MODEL` (default `gpt-4.1-mini`)
 - `OPENAI_API_KEY` (required only for OpenAI mode)
 - `DIGITAL_BRAIN_LLM_TIMEOUT_SEC` (default `20`)
+- `DIGITAL_BRAIN_FLOW_LLM_ASSIST` (`1|0`, default enabled)
+
+### Auth/RBAC defaults
+
+- `DIGITAL_BRAIN_AUTH_ENABLED` (`1|0`, default disabled for local compatibility)
+- `DIGITAL_BRAIN_AUTH_SESSION_HOURS` (default `12`)
+- `DIGITAL_BRAIN_AUTH_COOKIE_NAME` (default `digital_brain_session`)
+- `DIGITAL_BRAIN_AUTH_COOKIE_SECURE` (`1|0`, default `0`)
+- `DIGITAL_BRAIN_BOOTSTRAP_ADMIN_USER` (default `admin`)
+- `DIGITAL_BRAIN_BOOTSTRAP_ADMIN_PASSWORD` (default `admin123`)
 
 ---
 
@@ -832,6 +1036,8 @@ Every critical interaction emits an audit row into `audit_logs`:
 - `troubleshoot_next`
 - `feedback`
 - realtime ingest events
+- `auth_login`, `auth_logout`
+- `auth_user_create`, `auth_user_update`
 
 Audit payload is stored as JSON for post-hoc analysis and debugging.
 
@@ -851,7 +1057,7 @@ Audit payload is stored as JSON for post-hoc analysis and debugging.
 
 1. Replace/reinforce retrieval with hybrid vector + BM25 index.
 2. Move persistence to Postgres + vector extension for scale.
-3. Add auth + role controls (operator/admin).
+3. Extend auth for production (password reset, policy, SSO).
 4. Add dedicated telemetry dashboard (request latency, retrieval hit-rate, fallback-rate, feedback outcome trend).
 5. Add queue-backed async ingest workers for high ingest throughput.
 6. Add stronger grounding checks (answer sentence must map to citation chunk IDs).

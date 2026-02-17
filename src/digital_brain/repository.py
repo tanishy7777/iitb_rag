@@ -96,6 +96,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     payload_json TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -458,6 +476,154 @@ class Repository:
                 """,
                 (event_type, payload_json),
             )
+
+    def create_user(self, username: str, password_hash: str, role: str, is_active: bool = True) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO users (username, password_hash, role, is_active)
+                VALUES (?, ?, ?, ?)
+                """,
+                (username, password_hash, role, int(is_active)),
+            )
+            return int(cur.lastrowid)
+
+    def upsert_user(self, username: str, password_hash: str, role: str, is_active: bool = True) -> int:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (username, password_hash, role, is_active)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    password_hash = excluded.password_hash,
+                    role = excluded.role,
+                    is_active = excluded.is_active
+                """,
+                (username, password_hash, role, int(is_active)),
+            )
+            row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            return int(row["id"]) if row else 0
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, username, password_hash, role, is_active, created_at
+                FROM users WHERE username = ?
+                """,
+                (username,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, username, password_hash, role, is_active, created_at
+                FROM users WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def count_admin_users(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND is_active = 1"
+            ).fetchone()
+            return int(row["c"] if row else 0)
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, username, role, is_active, created_at
+                FROM users
+                ORDER BY id ASC
+                """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def update_user(
+        self,
+        user_id: int,
+        role: str | None = None,
+        is_active: bool | None = None,
+        password_hash: str | None = None,
+    ) -> bool:
+        assignments: list[str] = []
+        params: list[Any] = []
+        if role is not None:
+            assignments.append("role = ?")
+            params.append(role)
+        if is_active is not None:
+            assignments.append("is_active = ?")
+            params.append(int(is_active))
+        if password_hash is not None:
+            assignments.append("password_hash = ?")
+            params.append(password_hash)
+        if not assignments:
+            return False
+        params.append(user_id)
+        with self.connect() as conn:
+            cur = conn.execute(
+                f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+            return cur.rowcount > 0
+
+    def create_auth_session(
+        self,
+        session_id: str,
+        user_id: int,
+        token_hash: str,
+        expires_at: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO auth_sessions (session_id, user_id, token_hash, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, user_id, token_hash, expires_at),
+            )
+
+    def get_auth_session(self, token_hash: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT s.session_id, s.user_id, s.token_hash, s.expires_at, s.created_at, s.last_seen_at,
+                       u.username, u.role, u.is_active
+                FROM auth_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def touch_auth_session(self, session_id: str, expires_at: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE auth_sessions
+                SET expires_at = ?, last_seen_at = CURRENT_TIMESTAMP
+                WHERE session_id = ?
+                """,
+                (expires_at, session_id),
+            )
+
+    def delete_auth_session_by_token(self, token_hash: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+
+    def delete_auth_session(self, session_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM auth_sessions WHERE session_id = ?", (session_id,))
+
+    def delete_expired_auth_sessions(self, now_iso: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_iso,))
 
     def create_troubleshoot_session(
         self,

@@ -58,6 +58,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_event.add_argument("--diagnosis", type=str, default="")
     add_event.add_argument("--comments", type=str, default="")
 
+    create_user = sub.add_parser("create-user", help="Create or update auth user")
+    create_user.add_argument("--username", type=str, required=True)
+    create_user.add_argument("--password", type=str, required=True)
+    create_user.add_argument("--role", type=str, required=True, choices=["operator", "admin"])
+    create_user.add_argument("--inactive", action="store_true", help="Create user as inactive")
+    create_user.add_argument(
+        "--upsert",
+        action="store_true",
+        help="Update existing user by username if present",
+    )
+
     serve = sub.add_parser("serve", help="Run local HTTP server")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
@@ -152,6 +163,17 @@ def main() -> None:
                 "action_taken": args.action,
                 "comments": args.comments,
             }
+        )
+        print(json.dumps(payload, indent=2))
+        return
+
+    if args.command == "create-user":
+        payload = service.create_user(
+            username=args.username,
+            password=args.password,
+            role=args.role,
+            is_active=not args.inactive,
+            upsert=args.upsert,
         )
         print(json.dumps(payload, indent=2))
         return

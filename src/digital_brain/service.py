@@ -1,15 +1,27 @@
 from __future__ import annotations
 
+import binascii
+import hashlib
+import hmac
 import json
+import os
+import re
+import secrets
 import uuid
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
 from .chunking import TextChunk, build_chunks
+from .config import (
+    AUTH_ENABLED,
+    AUTH_SESSION_HOURS,
+    BOOTSTRAP_ADMIN_PASSWORD,
+    BOOTSTRAP_ADMIN_USER,
+)
 from .pdf_ingest import load_pdf_document, load_pdf_documents
 from .rag import RagSynthesizer
 from .repository import Repository
@@ -37,6 +49,214 @@ class DigitalBrainService:
         self.repo = Repository(db_path)
         self.retriever = self._build_retriever()
         self.synthesizer = RagSynthesizer()
+        self.auth_enabled = _env_bool("DIGITAL_BRAIN_AUTH_ENABLED", AUTH_ENABLED)
+        self.auth_session_hours = max(
+            1,
+            _env_int("DIGITAL_BRAIN_AUTH_SESSION_HOURS", AUTH_SESSION_HOURS),
+        )
+        self.flow_llm_assist = _env_bool("DIGITAL_BRAIN_FLOW_LLM_ASSIST", True)
+        if self.auth_enabled:
+            self._bootstrap_admin_if_needed()
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        role: str,
+        is_active: bool = True,
+        upsert: bool = False,
+    ) -> dict[str, Any]:
+        username_clean = username.strip()
+        role_clean = role.strip().lower()
+        if not username_clean:
+            raise ValueError("username is required")
+        if not password:
+            raise ValueError("password is required")
+        if role_clean not in {"operator", "admin"}:
+            raise ValueError("role must be one of: operator, admin")
+        pw_hash = _hash_password(password)
+        if upsert:
+            user_id = self.repo.upsert_user(
+                username=username_clean,
+                password_hash=pw_hash,
+                role=role_clean,
+                is_active=is_active,
+            )
+        else:
+            user_id = self.repo.create_user(
+                username=username_clean,
+                password_hash=pw_hash,
+                role=role_clean,
+                is_active=is_active,
+            )
+        self._audit(
+            "auth_user_create",
+            {"user_id": user_id, "username": username_clean, "role": role_clean, "upsert": upsert},
+        )
+        return {
+            "id": user_id,
+            "username": username_clean,
+            "role": role_clean,
+            "is_active": bool(is_active),
+        }
+
+    def list_users(self) -> list[dict[str, Any]]:
+        rows = self.repo.list_users()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            out.append(
+                {
+                    "id": int(row.get("id") or 0),
+                    "username": str(row.get("username") or ""),
+                    "role": str(row.get("role") or "operator"),
+                    "is_active": int(row.get("is_active") or 0) == 1,
+                    "created_at": str(row.get("created_at") or ""),
+                }
+            )
+        return out
+
+    def update_user(
+        self,
+        user_id: int,
+        role: str | None = None,
+        is_active: bool | None = None,
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        if user_id <= 0:
+            raise ValueError("user_id must be a positive integer")
+        existing = self.repo.get_user_by_id(user_id)
+        if existing is None:
+            raise ValueError("User not found")
+
+        role_clean: str | None = None
+        if role is not None:
+            role_clean = role.strip().lower()
+            if role_clean not in {"operator", "admin"}:
+                raise ValueError("role must be one of: operator, admin")
+
+        current_role = str(existing.get("role") or "operator")
+        current_active = int(existing.get("is_active") or 0) == 1
+        next_role = role_clean if role_clean is not None else current_role
+        next_active = is_active if is_active is not None else current_active
+
+        # Prevent lockout by removing/deactivating the last active admin.
+        if current_role == "admin" and current_active and (next_role != "admin" or not next_active):
+            if self.repo.count_admin_users() <= 1:
+                raise ValueError("Cannot remove or deactivate the last active admin")
+
+        password_hash: str | None = None
+        if password is not None:
+            if not password:
+                raise ValueError("password cannot be empty")
+            password_hash = _hash_password(password)
+
+        updated = self.repo.update_user(
+            user_id=user_id,
+            role=role_clean,
+            is_active=is_active,
+            password_hash=password_hash,
+        )
+        if not updated:
+            raise ValueError("No fields to update")
+        self._audit(
+            "auth_user_update",
+            {
+                "user_id": user_id,
+                "role_changed": role_clean is not None,
+                "active_changed": is_active is not None,
+                "password_changed": password is not None,
+            },
+        )
+        row = self.repo.get_user_by_id(user_id)
+        if row is None:
+            raise ValueError("User not found after update")
+        return {
+            "id": int(row.get("id") or 0),
+            "username": str(row.get("username") or ""),
+            "role": str(row.get("role") or "operator"),
+            "is_active": int(row.get("is_active") or 0) == 1,
+            "created_at": str(row.get("created_at") or ""),
+        }
+
+    def login(self, username: str, password: str) -> dict[str, Any]:
+        if not self.auth_enabled:
+            raise ValueError("Authentication is disabled")
+        username_clean = username.strip()
+        if not username_clean or not password:
+            raise ValueError("Invalid credentials")
+        user = self.repo.get_user_by_username(username_clean)
+        if user is None:
+            raise ValueError("Invalid credentials")
+        if int(user.get("is_active") or 0) != 1:
+            raise ValueError("User is inactive")
+        stored_hash = str(user.get("password_hash") or "")
+        if not _verify_password(password, stored_hash):
+            raise ValueError("Invalid credentials")
+
+        now = _utc_now_naive()
+        expires_at = now + timedelta(hours=self.auth_session_hours)
+        token = secrets.token_urlsafe(32)
+        token_hash = _hash_token(token)
+        session_id = str(uuid.uuid4())
+        self.repo.delete_expired_auth_sessions(_fmt_dt(now))
+        self.repo.create_auth_session(
+            session_id=session_id,
+            user_id=int(user.get("id") or 0),
+            token_hash=token_hash,
+            expires_at=_fmt_dt(expires_at),
+        )
+        self._audit(
+            "auth_login",
+            {"user_id": int(user.get("id") or 0), "username": username_clean, "session_id": session_id},
+        )
+        return {
+            "session_token": token,
+            "session_id": session_id,
+            "expires_at": _fmt_dt(expires_at),
+            "user": {
+                "id": int(user.get("id") or 0),
+                "username": str(user.get("username") or ""),
+                "role": str(user.get("role") or "operator"),
+            },
+        }
+
+    def get_authenticated_user(self, session_token: str, refresh: bool = True) -> dict[str, Any] | None:
+        if not self.auth_enabled:
+            return None
+        token = session_token.strip()
+        if not token:
+            return None
+        row = self.repo.get_auth_session(_hash_token(token))
+        if row is None:
+            return None
+        if int(row.get("is_active") or 0) != 1:
+            self.repo.delete_auth_session(str(row.get("session_id") or ""))
+            return None
+        expires_at = _parse_datetime(str(row.get("expires_at") or ""))
+        now = _utc_now_naive()
+        if expires_at is None or expires_at <= now:
+            self.repo.delete_auth_session(str(row.get("session_id") or ""))
+            return None
+        if refresh:
+            new_expires_at = now + timedelta(hours=self.auth_session_hours)
+            self.repo.touch_auth_session(str(row.get("session_id") or ""), _fmt_dt(new_expires_at))
+            expires_at = new_expires_at
+        return {
+            "id": int(row.get("user_id") or 0),
+            "username": str(row.get("username") or ""),
+            "role": str(row.get("role") or "operator"),
+            "session_id": str(row.get("session_id") or ""),
+            "expires_at": _fmt_dt(expires_at),
+        }
+
+    def logout(self, session_token: str) -> None:
+        if not self.auth_enabled:
+            return
+        token = session_token.strip()
+        if not token:
+            return
+        self.repo.delete_auth_session_by_token(_hash_token(token))
+        self._audit("auth_logout", {"token_present": True})
 
     def ingest_all(self, data_dir: Path) -> dict[str, int]:
         machines = self._load_machines(data_dir / "eqp-process_resources.sql")
@@ -315,7 +535,6 @@ class DigitalBrainService:
         triage = self._infer_triage(question)
         checklist = self._generate_checklist(triage)
         suggestions = self._historical_suggestions(machine_id, question)
-        flow = self._build_dynamic_flow(machine_id, question, triage)
         doc_lookup = self.repo.document_lookup()
         citations: list[dict[str, Any]] = []
 
@@ -358,6 +577,18 @@ class DigitalBrainService:
             )
             answer_mode = "deterministic_guardrail"
 
+        flow = self._build_hybrid_flow(
+            machine_id=machine_id,
+            question=question,
+            triage=triage,
+            checklist=checklist,
+            citations=citations,
+            suggestions=suggestions,
+            confidence_label=confidence_label,
+            answer_mode=answer_mode,
+            must_fallback=must_fallback,
+        )
+
         return QueryResponse(
             session_id=session_id,
             machine_id=machine_id,
@@ -371,6 +602,56 @@ class DigitalBrainService:
             historical_suggestions=suggestions,
             troubleshooting_flow=flow,
         )
+
+    def _build_hybrid_flow(
+        self,
+        machine_id: int,
+        question: str,
+        triage: str,
+        checklist: list[str],
+        citations: list[dict[str, Any]],
+        suggestions: list[dict[str, Any]],
+        confidence_label: str,
+        answer_mode: str,
+        must_fallback: bool,
+    ) -> dict[str, Any]:
+        deterministic_flow = self._build_dynamic_flow(machine_id, question, triage)
+        deterministic_flow["flow_mode"] = "deterministic"
+        deterministic_flow["flow_source"] = "history_rules"
+
+        if not self.flow_llm_assist:
+            deterministic_flow["flow_reason"] = "llm_assist_disabled"
+            return deterministic_flow
+        if must_fallback:
+            deterministic_flow["flow_reason"] = "low_evidence_guardrail"
+            return deterministic_flow
+        if not answer_mode.startswith("llm_"):
+            deterministic_flow["flow_reason"] = "llm_answer_not_available"
+            return deterministic_flow
+
+        proposed, meta = self.synthesizer.synthesize_flow(
+            {
+                "machine_id": machine_id,
+                "question": question,
+                "triage": triage,
+                "checklist": checklist,
+                "citations": citations,
+                "historical_suggestions": suggestions,
+                "confidence_label": confidence_label,
+            }
+        )
+        validated, reason = self._validate_llm_flow(proposed)
+        if validated is None:
+            deterministic_flow["flow_mode"] = "deterministic_fallback"
+            deterministic_flow["flow_reason"] = reason or str(meta.get("error") or "invalid_llm_flow")
+            deterministic_flow["flow_source"] = "history_rules"
+            return deterministic_flow
+
+        validated["query_terms"] = tokenize(question)
+        validated["history_snapshot"] = deterministic_flow.get("history_snapshot", {})
+        validated["flow_mode"] = "llm_assisted"
+        validated["flow_source"] = str(meta.get("mode") or "llm_flow")
+        return validated
 
     def submit_feedback(
         self,
@@ -402,6 +683,24 @@ class DigitalBrainService:
         analytics = self.repo.admin_analytics()
         analytics["knowledge_gaps"] = self._knowledge_gap_clusters(analytics)
         return analytics
+
+    def _bootstrap_admin_if_needed(self) -> None:
+        if self.repo.count_admin_users() > 0:
+            return
+        username = os.getenv("DIGITAL_BRAIN_BOOTSTRAP_ADMIN_USER", BOOTSTRAP_ADMIN_USER).strip()
+        password = os.getenv(
+            "DIGITAL_BRAIN_BOOTSTRAP_ADMIN_PASSWORD",
+            BOOTSTRAP_ADMIN_PASSWORD,
+        )
+        if not username or not password:
+            return
+        self.create_user(
+            username=username,
+            password=password,
+            role="admin",
+            is_active=True,
+            upsert=True,
+        )
 
     def _audit(self, event_type: str, payload: dict[str, Any]) -> None:
         try:
@@ -727,6 +1026,102 @@ class DigitalBrainService:
             )
         return suggestions
 
+    def _validate_llm_flow(self, flow: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+        if not isinstance(flow, dict):
+            return None, "llm_flow_missing"
+
+        start_node_id = str(flow.get("start_node_id") or "").strip()
+        raw_nodes = flow.get("nodes")
+        if not start_node_id:
+            return None, "llm_flow_missing_start_node"
+        if not isinstance(raw_nodes, list):
+            return None, "llm_flow_nodes_not_list"
+        if len(raw_nodes) < 3 or len(raw_nodes) > 10:
+            return None, "llm_flow_nodes_out_of_range"
+
+        node_ids: set[str] = set()
+        sanitized_nodes: list[dict[str, Any]] = []
+        final_count = 0
+
+        for raw in raw_nodes:
+            if not isinstance(raw, dict):
+                return None, "llm_flow_node_invalid"
+            node_id = str(raw.get("id") or "").strip()
+            kind = str(raw.get("kind") or "").strip().lower()
+            text = _shorten(str(raw.get("text") or "").strip(), 220)
+            if not node_id or not re.fullmatch(r"[a-zA-Z0-9_\\-]+", node_id):
+                return None, "llm_flow_node_id_invalid"
+            if node_id in node_ids:
+                return None, "llm_flow_node_id_duplicate"
+            if kind not in {"question", "action", "final"}:
+                return None, "llm_flow_kind_invalid"
+            if not text:
+                return None, "llm_flow_text_missing"
+            node_ids.add(node_id)
+
+            node: dict[str, Any] = {"id": node_id, "kind": kind, "text": text}
+            if kind == "question":
+                yes = str(raw.get("yes") or "").strip()
+                no = str(raw.get("no") or "").strip()
+                if not yes or not no:
+                    return None, "llm_flow_question_missing_edges"
+                node["yes"] = yes
+                node["no"] = no
+            elif kind == "action":
+                nxt = str(raw.get("next") or "").strip()
+                if not nxt:
+                    return None, "llm_flow_action_missing_next"
+                node["next"] = nxt
+            else:
+                final_count += 1
+            sanitized_nodes.append(node)
+
+        if start_node_id not in node_ids:
+            return None, "llm_flow_start_not_found"
+        if final_count == 0:
+            return None, "llm_flow_missing_final"
+
+        node_lookup = {str(node["id"]): node for node in sanitized_nodes}
+        for node in sanitized_nodes:
+            kind = str(node.get("kind") or "")
+            if kind == "question":
+                yes = str(node.get("yes") or "")
+                no = str(node.get("no") or "")
+                if yes not in node_lookup or no not in node_lookup:
+                    return None, "llm_flow_question_edge_unknown"
+            elif kind == "action":
+                nxt = str(node.get("next") or "")
+                if nxt not in node_lookup:
+                    return None, "llm_flow_action_next_unknown"
+
+        # Verify at least one path from start reaches a final node.
+        stack = [start_node_id]
+        visited: set[str] = set()
+        reaches_final = False
+        steps = 0
+        while stack and steps < 200:
+            steps += 1
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            node = node_lookup.get(current)
+            if not node:
+                continue
+            kind = str(node.get("kind") or "")
+            if kind == "final":
+                reaches_final = True
+                break
+            if kind == "question":
+                stack.append(str(node.get("yes") or ""))
+                stack.append(str(node.get("no") or ""))
+            elif kind == "action":
+                stack.append(str(node.get("next") or ""))
+        if not reaches_final:
+            return None, "llm_flow_no_final_path"
+
+        return {"start_node_id": start_node_id, "nodes": sanitized_nodes}, ""
+
     def _build_dynamic_flow(self, machine_id: int, question: str, triage: str) -> dict[str, Any]:
         stats = self._history_signal_stats(machine_id)
         default_action = self._signal_action(stats, "general", "Escalate to EMT with latest alarm snapshot.")
@@ -1014,10 +1409,63 @@ def _parse_datetime(raw: str) -> datetime | None:
     value = raw.strip()
     if not value:
         return None
-    formats = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d")
+    formats = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S")
     for fmt in formats:
         try:
             return datetime.strptime(value, fmt)
         except ValueError:
             continue
     return None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _fmt_dt(value: datetime) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    iterations = 240000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${binascii.hexlify(salt).decode('ascii')}${binascii.hexlify(digest).decode('ascii')}"
+
+
+def _verify_password(password: str, encoded: str) -> bool:
+    try:
+        algo, iter_raw, salt_hex, hash_hex = encoded.split("$", 3)
+    except ValueError:
+        return False
+    if algo != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(iter_raw)
+        salt = binascii.unhexlify(salt_hex.encode("ascii"))
+        expected = binascii.unhexlify(hash_hex.encode("ascii"))
+    except (ValueError, binascii.Error):
+        return False
+    computed = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(computed, expected)
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()

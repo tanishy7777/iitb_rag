@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Digital Brain - Sign In</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="layout" style="max-width:560px;">
+    <h1>Digital Brain - Sign In</h1>
+    <p class="sub">Use your operator or admin account to continue.</p>
+
+    <section class="card">
+      <label for="username">Username</label>
+      <input id="username" autocomplete="username" />
+
+      <label for="password" style="margin-top:10px;">Password</label>
+      <input id="password" type="password" autocomplete="current-password" />
+
+      <div style="margin-top:12px;">
+        <button id="login">Sign In</button>
+      </div>
+      <p id="status" class="small"></p>
+    </section>
+  </main>
+
+  <script>
+    function nextTarget() {
+      const params = new URLSearchParams(window.location.search);
+      const next = params.get('next');
+      if (!next || !next.startsWith('/')) return '';
+      return next;
+    }
+
+    function targetForRole(role) {
+      const next = nextTarget();
+      if (next) return next;
+      if (role === 'admin') return '/admin.html';
+      return '/operator.html';
+    }
+
+    async function checkExistingSession() {
+      const res = await fetch('/api/auth/me');
+      const data = await res.json();
+      if (!data.auth_enabled) {
+        window.location.href = '/operator.html';
+        return;
+      }
+      if (data.authenticated) {
+        const role = (data.user || {}).role || 'operator';
+        window.location.href = targetForRole(role);
+      }
+    }
+
+    async function login() {
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      if (!username || !password) {
+        document.getElementById('status').textContent = 'Username and password are required.';
+        return;
+      }
+
+      document.getElementById('status').textContent = 'Signing in...';
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        document.getElementById('status').textContent = data.error || 'Login failed.';
+        return;
+      }
+      const role = (data.user || {}).role || 'operator';
+      window.location.href = targetForRole(role);
+    }
+
+    document.getElementById('login').addEventListener('click', login);
+    document.getElementById('password').addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') login();
+    });
+    checkExistingSession();
+  </script>
+</body>
+</html>

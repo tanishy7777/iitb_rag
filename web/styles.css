@@ -44,6 +44,7 @@ h1 {
 nav {
   margin: 0 0 18px;
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -51,6 +52,46 @@ nav a {
   color: var(--accent-dark);
   text-decoration: none;
   font-weight: 700;
+}
+
+.auth-row {
+  margin: -8px 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inline-btn {
+  width: auto;
+  padding: 8px 12px;
+}
+
+.users-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.user-row {
+  border: 1px solid #d8d0bc;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fffdfa;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr;
+}
+
+.user-row .meta {
+  font-size: 0.9rem;
+  color: #454545;
+}
+
+@media (min-width: 900px) {
+  .user-row {
+    grid-template-columns: 2fr 1fr 1fr 2fr 1fr;
+    align-items: center;
+  }
 }
 
 .card {

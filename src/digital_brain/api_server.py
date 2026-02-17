@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import DEFAULT_WEB_DIR
+from .config import AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE, DEFAULT_WEB_DIR
 from .service import DigitalBrainService
 
 
@@ -16,11 +17,19 @@ class BrainHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/auth/me":
+            self._handle_auth_me()
+            return
+
         if parsed.path == "/api/machines":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             self._json_response(200, {"machines": self.service.list_machines()})
             return
 
         if parsed.path == "/api/machines/recent":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             query = parse_qs(parsed.query)
             raw_limit = str((query.get("limit") or ["8"])[0]).strip()
             try:
@@ -32,10 +41,20 @@ class BrainHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/analytics":
+            if self._require_roles({"admin"}) is None:
+                return
             self._json_response(200, self.service.admin_analytics())
             return
 
+        if parsed.path == "/api/admin/users":
+            if self._require_roles({"admin"}) is None:
+                return
+            self._json_response(200, {"users": self.service.list_users()})
+            return
+
         if parsed.path == "/api/troubleshoot/session":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             query = parse_qs(parsed.query)
             session_id = str((query.get("session_id") or [""])[0]).strip()
             if not session_id:
@@ -49,8 +68,60 @@ class BrainHandler(SimpleHTTPRequestHandler):
             self._json_response(200, payload)
             return
 
+        if parsed.path == "/login.html":
+            if self.service.auth_enabled:
+                user = self._current_user(refresh=False)
+                if user:
+                    if str(user.get("role") or "") == "admin":
+                        self.send_response(302)
+                        self.send_header("Location", "/admin.html")
+                        self.end_headers()
+                        return
+                    self.send_response(302)
+                    self.send_header("Location", "/operator.html")
+                    self.end_headers()
+                    return
+            super().do_GET()
+            return
+
         if parsed.path == "/":
-            self.path = "/operator.html"
+            if self.service.auth_enabled:
+                user = self._current_user(refresh=False)
+                if user:
+                    if str(user.get("role") or "") == "admin":
+                        self.path = "/admin.html"
+                    else:
+                        self.path = "/operator.html"
+                else:
+                    self.path = "/login.html"
+            else:
+                self.path = "/operator.html"
+
+        if parsed.path == "/operator.html" and self.service.auth_enabled:
+            user = self._current_user(refresh=False)
+            if user is None:
+                self.send_response(302)
+                self.send_header("Location", "/login.html?next=/operator.html")
+                self.end_headers()
+                return
+            if str(user.get("role") or "") not in {"operator", "admin"}:
+                self.send_response(302)
+                self.send_header("Location", "/login.html?next=/operator.html")
+                self.end_headers()
+                return
+
+        if parsed.path == "/admin.html" and self.service.auth_enabled:
+            user = self._current_user(refresh=False)
+            if user is None:
+                self.send_response(302)
+                self.send_header("Location", "/login.html?next=/admin.html")
+                self.end_headers()
+                return
+            if str(user.get("role") or "") != "admin":
+                self.send_response(302)
+                self.send_header("Location", "/operator.html")
+                self.end_headers()
+                return
 
         super().do_GET()
 
@@ -65,35 +136,186 @@ class BrainHandler(SimpleHTTPRequestHandler):
             self._json_response(400, {"error": "Invalid JSON payload"})
             return
 
+        if parsed.path == "/api/auth/login":
+            self._handle_auth_login(payload)
+            return
+
+        if parsed.path == "/api/auth/logout":
+            self._handle_auth_logout()
+            return
+
         if parsed.path == "/api/query":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             self._handle_query(payload)
             return
 
         if parsed.path == "/api/troubleshoot/start":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             self._handle_troubleshoot_start(payload)
             return
 
         if parsed.path == "/api/troubleshoot/next":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             self._handle_troubleshoot_next(payload)
             return
 
         if parsed.path == "/api/realtime/document":
+            if self._require_roles({"admin"}) is None:
+                return
             self._handle_realtime_document(payload)
             return
 
         if parsed.path == "/api/realtime/complaint":
+            if self._require_roles({"admin"}) is None:
+                return
             self._handle_realtime_complaint(payload)
             return
 
         if parsed.path == "/api/realtime/trouble-event":
+            if self._require_roles({"admin"}) is None:
+                return
             self._handle_realtime_trouble_event(payload)
             return
 
+        if parsed.path == "/api/admin/users":
+            if self._require_roles({"admin"}) is None:
+                return
+            self._handle_admin_create_user(payload)
+            return
+
+        if parsed.path == "/api/admin/users/update":
+            if self._require_roles({"admin"}) is None:
+                return
+            self._handle_admin_update_user(payload)
+            return
+
         if parsed.path == "/api/feedback":
+            if self._require_roles({"operator", "admin"}) is None:
+                return
             self._handle_feedback(payload)
             return
 
         self._json_response(404, {"error": "Not found"})
+
+    def _handle_auth_me(self) -> None:
+        if not self.service.auth_enabled:
+            self._json_response(200, {"auth_enabled": False, "authenticated": False})
+            return
+        user = self._current_user(refresh=True)
+        if user is None:
+            self._json_response(200, {"auth_enabled": True, "authenticated": False})
+            return
+        self._json_response(
+            200,
+            {
+                "auth_enabled": True,
+                "authenticated": True,
+                "user": {
+                    "id": user.get("id"),
+                    "username": user.get("username"),
+                    "role": user.get("role"),
+                },
+                "expires_at": user.get("expires_at"),
+            },
+        )
+
+    def _handle_auth_login(self, payload: dict) -> None:
+        if not self.service.auth_enabled:
+            self._json_response(400, {"error": "Authentication is disabled"})
+            return
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        try:
+            login_payload = self.service.login(username=username, password=password)
+        except ValueError as exc:
+            msg = str(exc)
+            status = 401 if "credentials" in msg.lower() or "inactive" in msg.lower() else 400
+            self._json_response(status, {"error": msg})
+            return
+
+        cookie_value = self._build_auth_cookie(str(login_payload.get("session_token") or ""))
+        self._json_response(
+            200,
+            {
+                "ok": True,
+                "user": login_payload.get("user"),
+                "expires_at": login_payload.get("expires_at"),
+            },
+            headers={"Set-Cookie": cookie_value},
+        )
+
+    def _handle_auth_logout(self) -> None:
+        token = self._session_token()
+        self.service.logout(token)
+        self._json_response(
+            200,
+            {"ok": True},
+            headers={"Set-Cookie": self._clear_auth_cookie()},
+        )
+
+    def _session_token(self) -> str:
+        cookie_name = os.getenv("DIGITAL_BRAIN_AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        jar = SimpleCookie()
+        try:
+            jar.load(raw)
+        except Exception:  # noqa: BLE001
+            return ""
+        item = jar.get(cookie_name)
+        if item is None:
+            return ""
+        return str(item.value or "")
+
+    def _current_user(self, refresh: bool) -> dict | None:
+        if not self.service.auth_enabled:
+            return {"id": None, "username": "local", "role": "admin", "expires_at": None}
+        token = self._session_token()
+        if not token:
+            return None
+        return self.service.get_authenticated_user(token, refresh=refresh)
+
+    def _require_roles(self, roles: set[str]) -> dict | None:
+        if not self.service.auth_enabled:
+            return {"id": None, "username": "local", "role": "admin"}
+        user = self._current_user(refresh=True)
+        if user is None:
+            self._json_response(401, {"error": "Authentication required"})
+            return None
+        role = str(user.get("role") or "")
+        if role not in roles:
+            self._json_response(403, {"error": "Forbidden"})
+            return None
+        return user
+
+    def _build_auth_cookie(self, token: str) -> str:
+        cookie_name = os.getenv("DIGITAL_BRAIN_AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
+        secure_cookie = os.getenv("DIGITAL_BRAIN_AUTH_COOKIE_SECURE", str(AUTH_COOKIE_SECURE)).strip().lower()
+        jar = SimpleCookie()
+        jar[cookie_name] = token
+        jar[cookie_name]["path"] = "/"
+        jar[cookie_name]["httponly"] = True
+        jar[cookie_name]["samesite"] = "Lax"
+        if secure_cookie in {"1", "true", "yes", "on"}:
+            jar[cookie_name]["secure"] = True
+        return jar.output(header="").strip()
+
+    def _clear_auth_cookie(self) -> str:
+        cookie_name = os.getenv("DIGITAL_BRAIN_AUTH_COOKIE_NAME", AUTH_COOKIE_NAME)
+        secure_cookie = os.getenv("DIGITAL_BRAIN_AUTH_COOKIE_SECURE", str(AUTH_COOKIE_SECURE)).strip().lower()
+        jar = SimpleCookie()
+        jar[cookie_name] = ""
+        jar[cookie_name]["path"] = "/"
+        jar[cookie_name]["httponly"] = True
+        jar[cookie_name]["samesite"] = "Lax"
+        jar[cookie_name]["max-age"] = 0
+        if secure_cookie in {"1", "true", "yes", "on"}:
+            jar[cookie_name]["secure"] = True
+        return jar.output(header="").strip()
 
     def _handle_query(self, payload: dict) -> None:
         machine_id = payload.get("machine_id")
@@ -225,11 +447,74 @@ class BrainHandler(SimpleHTTPRequestHandler):
             return
         self._json_response(200, response)
 
-    def _json_response(self, code: int, payload: dict) -> None:
+    def _handle_admin_create_user(self, payload: dict) -> None:
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        role = str(payload.get("role") or "").strip().lower()
+        if not username:
+            self._json_response(400, {"error": "username is required"})
+            return
+        if not password:
+            self._json_response(400, {"error": "password is required"})
+            return
+        if role not in {"operator", "admin"}:
+            self._json_response(400, {"error": "role must be one of: operator, admin"})
+            return
+        is_active = bool(payload.get("is_active", True))
+        upsert = bool(payload.get("upsert", True))
+        try:
+            response = self.service.create_user(
+                username=username,
+                password=password,
+                role=role,
+                is_active=is_active,
+                upsert=upsert,
+            )
+        except ValueError as exc:
+            self._json_response(400, {"error": str(exc)})
+            return
+        self._json_response(200, {"ok": True, "user": response})
+
+    def _handle_admin_update_user(self, payload: dict) -> None:
+        user_id = payload.get("user_id")
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            self._json_response(400, {"error": "user_id must be an integer"})
+            return
+
+        role_raw = payload.get("role")
+        role = str(role_raw).strip().lower() if role_raw is not None else None
+
+        is_active = payload.get("is_active")
+        if is_active is not None:
+            is_active = bool(is_active)
+
+        password_raw = payload.get("password")
+        password = str(password_raw) if password_raw is not None else None
+        if password is not None and not password:
+            password = None
+
+        try:
+            updated = self.service.update_user(
+                user_id=user_id_int,
+                role=role,
+                is_active=is_active,
+                password=password,
+            )
+        except ValueError as exc:
+            self._json_response(400, {"error": str(exc)})
+            return
+        self._json_response(200, {"ok": True, "user": updated})
+
+    def _json_response(self, code: int, payload: dict, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if headers:
+            for key, value in headers.items():
+                self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 

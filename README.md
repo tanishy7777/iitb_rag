@@ -71,6 +71,32 @@ Open:
 - `http://127.0.0.1:8080/operator.html`
 - `http://127.0.0.1:8080/admin.html`
 
+### 3b. Enable authentication + RBAC (operator/admin)
+
+By default, auth is off for local compatibility. Enable it with:
+
+```bash
+export DIGITAL_BRAIN_AUTH_ENABLED=1
+export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_USER=admin
+export DIGITAL_BRAIN_BOOTSTRAP_ADMIN_PASSWORD=admin123
+```
+
+Then start server and open:
+
+- `http://127.0.0.1:8080/login.html`
+
+Role rules:
+
+- `operator`: operator APIs and `operator.html`
+- `admin`: operator + admin APIs, realtime ingest APIs, and `admin.html`
+
+Create extra users from CLI:
+
+```bash
+PYTHONPATH=src python3 -m digital_brain create-user --username operator1 --password operator123 --role operator --upsert
+PYTHONPATH=src python3 -m digital_brain create-user --username admin2 --password admin456 --role admin --upsert
+```
+
 ### Troubleshooting session APIs
 
 - `POST /api/troubleshoot/start` with `{ "machine_id": 7, "question": "..." }`
@@ -87,6 +113,18 @@ export DIGITAL_BRAIN_LLM_PROVIDER=ollama
 export DIGITAL_BRAIN_OLLAMA_MODEL=llama3
 export DIGITAL_BRAIN_OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
+
+Optional hybrid-flow toggle (LLM-assisted flow + deterministic validation/fallback):
+
+```bash
+export DIGITAL_BRAIN_FLOW_LLM_ASSIST=1
+```
+
+When enabled, troubleshooting flow uses:
+
+- LLM-assisted proposal when LLM answer mode is active
+- strict flow validation (node kinds/transitions)
+- deterministic fallback with `flow_reason` when proposal is invalid
 
 Start Ollama and pull model if needed:
 
@@ -110,6 +148,18 @@ export DIGITAL_BRAIN_OPENAI_MODEL=gpt-4.1-mini
 - `POST /api/realtime/document` with `{ "path": "data/new_manual.pdf", "machine_id": 7, "doc_type": "manual" }`
 - `POST /api/realtime/complaint` with `{ "machine_id": 7, "complaint_description": "...", "status": 0 }`
 - `POST /api/realtime/trouble-event` with `{ "complaint_id": 123, "action_taken": "...", "diagnosis": "..."}`
+
+### Auth APIs
+
+- `POST /api/auth/login` with `{ "username": "...", "password": "..." }`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+
+### Admin User Management APIs (admin role)
+
+- `GET /api/admin/users`
+- `POST /api/admin/users` with `{ "username": "...", "password": "...", "role": "operator|admin", "is_active": true, "upsert": true }`
+- `POST /api/admin/users/update` with `{ "user_id": 2, "role": "operator|admin", "is_active": true, "password": "optional_new_password" }`
 
 These updates are applied immediately. Document ingest rebuilds retrieval index in-process, and complaint/trouble/feedback updates affect ranking on the next query.
 

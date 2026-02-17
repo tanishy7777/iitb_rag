@@ -14,6 +14,10 @@
       <a href="/operator.html">Operator View</a>
       <a href="/admin.html">Admin Dashboard</a>
     </nav>
+    <div class="auth-row">
+      <p id="auth-user" class="small">Auth: checking...</p>
+      <button id="logout" class="alt inline-btn">Logout</button>
+    </div>
 
     <section class="card">
       <h3>Recent Machines</h3>
@@ -101,6 +105,44 @@
     let flowLog = [];
     let uiBusy = false;
 
+    async function apiFetch(url, options) {
+      const res = await fetch(url, options || {});
+      if (res.status === 401) {
+        window.location.href = `/login.html?next=${encodeURIComponent(window.location.pathname)}`;
+        throw new Error('unauthorized');
+      }
+      if (res.status === 403) {
+        window.location.href = '/operator.html';
+        throw new Error('forbidden');
+      }
+      return res;
+    }
+
+    async function ensureAuth() {
+      const res = await fetch('/api/auth/me');
+      const data = await res.json();
+      if (!data.auth_enabled) {
+        document.getElementById('auth-user').textContent = 'Auth: disabled (local mode)';
+        document.getElementById('logout').style.display = 'none';
+        return true;
+      }
+      if (!data.authenticated) {
+        window.location.href = `/login.html?next=${encodeURIComponent(window.location.pathname)}`;
+        return false;
+      }
+      const user = data.user || {};
+      document.getElementById('auth-user').textContent = `Signed in as ${user.username || 'user'} (${user.role || 'operator'})`;
+      return true;
+    }
+
+    async function logout() {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      } finally {
+        window.location.href = '/login.html';
+      }
+    }
+
     function setUiBusy(isBusy, text) {
       uiBusy = isBusy;
       const controls = [
@@ -130,7 +172,7 @@
     }
 
     async function loadMachines() {
-      const res = await fetch('/api/machines');
+      const res = await apiFetch('/api/machines');
       const data = await res.json();
       const select = document.getElementById('machine');
       select.innerHTML = '';
@@ -152,7 +194,7 @@
     }
 
     async function loadRecentMachines() {
-      const res = await fetch('/api/machines/recent?limit=8');
+      const res = await apiFetch('/api/machines/recent?limit=8');
       const data = await res.json();
       const ul = document.getElementById('recent-machines');
       ul.innerHTML = '';
@@ -235,13 +277,18 @@
       flowLog = [];
 
       const history = flow?.history_snapshot || {};
+      const flowMode = flow?.flow_mode || 'deterministic';
+      const flowSource = flow?.flow_source || 'history_rules';
+      const flowReason = flow?.flow_reason || '';
       const totals = Object.entries(history)
         .filter(([_, v]) => (v?.count || 0) > 0)
         .slice(0, 3)
         .map(([k, v]) => `${k}:${v.count}`);
-      document.getElementById('flow-meta').textContent = totals.length
+      const historyText = totals.length
         ? `History signals used: ${totals.join(', ')}`
         : 'History signal is limited for this machine.';
+      document.getElementById('flow-meta').textContent =
+        `Flow mode: ${flowMode} (${flowSource}) | ${historyText}${flowReason ? ` | reason: ${flowReason}` : ''}`;
 
       if (!currentNode || !currentNode.id) {
         document.getElementById('flow-step').textContent = 'No flow generated yet.';
@@ -261,7 +308,7 @@
 
       setUiBusy(true, 'Processing troubleshooting step...');
       try {
-        const res = await fetch('/api/troubleshoot/next', {
+        const res = await apiFetch('/api/troubleshoot/next', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -292,7 +339,7 @@
 
       setUiBusy(true, 'Running diagnosis with RAG/LLM...');
       try {
-        const res = await fetch('/api/troubleshoot/start', {
+        const res = await apiFetch('/api/troubleshoot/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ machine_id: machineId, question })
@@ -342,7 +389,7 @@
 
       setUiBusy(true, 'Saving feedback...');
       try {
-        const res = await fetch('/api/feedback', {
+        const res = await apiFetch('/api/feedback', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -372,9 +419,16 @@
     document.getElementById('chip-tooling').addEventListener('click', () => {
       document.getElementById('question').value = 'recipe alignment wafer process issue';
     });
+    document.getElementById('logout').addEventListener('click', logout);
 
-    loadMachines();
-    loadRecentMachines();
+    async function init() {
+      const ok = await ensureAuth();
+      if (!ok) return;
+      await loadMachines();
+      await loadRecentMachines();
+    }
+
+    init();
     setFlowVisibility('final');
   </script>
 </body>
