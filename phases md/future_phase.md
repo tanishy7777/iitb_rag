@@ -26,6 +26,70 @@ Next:
 
 
 
+Next (found):
+ok so I tried the operator ui and I asked about vacuum pressure leak gas flow issue in machineid: 1 DSA
+  machine, got a confidence score 0.641. Went through the interactive troubleshooting flow. And clicked
+  thumbs up on did it fix it? Now what all is getting updateed? I ran the same query again, got the same
+  confidence score (shldnt it increase since similar query previously fixed it), update the historical
+  suggestions section? If the issue got reesolved is it not being shown in the analytics panel? if not then
+  why is this a design choice?
+
+
+  What got updated when you clicked thumbs-up:
+
+  - feedback table got a new row:
+      - machine_id=1
+      - issue='vacuum pressure leak gas flow issue'
+      - helpful=1
+      - workaround='' (empty)
+      - created_at='2026-02-18 06:25:18'
+  - audit_logs got a feedback event with workaround_present=false.
+  - Your troubleshoot session/events were already updated during flow steps in:
+      - troubleshoot_sessions
+      - troubleshoot_events
+
+  Why confidence stayed 0.641:
+
+  - Confidence formula is fixed in src/digital_brain/service.py:729.
+  - It depends on:
+      - citation BM25 score
+      - score separation
+      - history signal from historical_suggestions
+  - Your latest thumbs-up had no workaround text. In code, helpful feedback is only added to suggestions if
+    helpful=1 AND workaround is non-empty (src/digital_brain/service.py:1015 to src/digital_brain/
+    service.py:1021).
+  - Also, for your query, history_signal is already saturated at 1.0 (max), so even more history would not
+    raise confidence further.
+  - I reproduced your query; it still computes to 0.641 from unchanged citation signals + maxed history
+    signal.
+
+  Historical suggestions update behavior:
+
+  - Yes, they can update, but only from:
+      1. complaint/trouble history, and
+      2. helpful feedback with non-empty workaround and term overlap.
+  - So thumbs-up alone (no workaround) does not enrich the suggestions list.
+
+  Why “resolved” may not appear in analytics:
+
+  - “Unresolved Issues” panel is based on complaints.status != 2 (src/digital_brain/repository.py:803+713).
+  - Submitting feedback does not change complaint status (submit_feedback only inserts into feedback).
+  - This is a deliberate separation:
+      - feedback = “assistant answer quality”
+      - complaint status = “incident lifecycle truth”
+  - So auto-closing complaints from thumbs-up is intentionally avoided to prevent false resolution reporting.
+
+  Where your thumbs-up is visible in analytics:
+
+  - It appears in feedback_summary (helpful/not helpful counts), not unresolved list.
+  - “At-Risk Queue” shows only failed feedback (helpful=0), so thumbs-up won’t show there.
+
+  If you want, I can implement the behavior you expected:
+
+  1. Option A: allow helpful feedback (even without workaround) to boost history/confidence.
+  2. Option B: when flow is closed + thumbs-up, auto-mark or suggest marking related complaint as resolved.
+  3. Option C: add a new analytics card: “Resolved by assistant feedback” separate from complaint status.
+
 • Next phase is production hardening + pilot readiness.
 
   1. Enterprise Auth Hardening

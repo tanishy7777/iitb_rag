@@ -37,7 +37,7 @@ Overall: **MVP end-to-end delivered** with realtime updates, RBAC auth, and loca
 - Admin user management (create/update users, role and active status)
 - Auth APIs + session cookies + role enforcement
 - Confidence guardrails + audit logging
-- Optional local LLM synthesis via **Ollama llama3** (default)
+- Local LLM synthesis via **Ollama llama3** (default)
 
 ### Partially Complete / Next Hardening
 - Enterprise auth hardening (password reset policy, SSO integration, account governance)
